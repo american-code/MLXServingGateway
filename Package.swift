@@ -27,5 +27,9 @@ let package = Package(
                 .product(name: "Hummingbird", package: "hummingbird"),
             ]
         ),
+        .testTarget(
+            name: "MLXGatewayTests",
+            dependencies: ["MLXGateway"]
+        ),
     ]
 )
