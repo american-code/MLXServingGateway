@@ -99,12 +99,22 @@ public actor MLXInferenceEngine {
 
                 if let entry = cachedEntry, prefixLen > 0 {
                     // Hit: restore cached KV state, process only the suffix.
-                    kvCaches = entry.layerStates.map { layerState in
+                    var restored = entry.layerStates.map { layerState in
                         let c = KVCacheSimple()
                         c.state = layerState
                         return c as any KVCache
                     }
-                    inputTokenIds = Array(promptTokenIds[prefixLen...])
+                    let suffix = Array(promptTokenIds[prefixLen...])
+                    if suffix.isEmpty {
+                        // Full prefix hit — re-process the last prompt token so
+                        // TokenIterator has at least one token to prefill and
+                        // produce logits for the first generated token.
+                        restored.forEach { $0.trim(1) }
+                        inputTokenIds = [promptTokenIds.last!]
+                    } else {
+                        inputTokenIds = suffix
+                    }
+                    kvCaches = restored
                 } else {
                     // Miss: fresh cache, process the whole prompt.
                     kvCaches = context.model.newCache(parameters: params)
@@ -127,11 +137,13 @@ public actor MLXInferenceEngine {
                 // On a cold miss, snapshot KV state at the prompt boundary.
                 // The iterator has already generated one token, so trim 1 off.
                 if cachedEntry == nil || prefixLen == 0 {
-                    let layerStates: [[MLXArray]] = kvCaches.map { c in
+                    // eval() materialises the graph before the actor send; nonisolated(unsafe)
+                    // suppresses region-isolation false positives on @unchecked Sendable MLXArrays.
+                    nonisolated(unsafe) let layerStates: [[MLXArray]] = kvCaches.map { c in
                         let snap = c.copy()
                         snap.trim(1)
                         let st = snap.state
-                        eval(st)    // materialise graph before crossing actor boundary
+                        eval(st)
                         return st
                     }
                     await prefixCache.store(tokens: promptInt32, layerStates: layerStates)

@@ -71,7 +71,7 @@ public actor KVPrefixCache {
     ///
     /// `layerStates[i]` must be `[keys, values]` for layer i, already eval'd on
     /// the GPU so the computation graph is fully materialised before storage.
-    public func store(tokens: [Int32], layerStates: [[MLXArray]]) {
+    public func store(tokens: [Int32], layerStates: sending [[MLXArray]]) {
         guard !tokens.isEmpty else { return }
 
         var node = root
