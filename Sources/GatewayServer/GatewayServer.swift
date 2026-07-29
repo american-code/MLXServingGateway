@@ -7,21 +7,14 @@ struct GatewayServer {
     static func main() async throws {
         let router = Router()
 
+        let engine = MLXInferenceEngine()
+        let assembler = BatchAssembler(
+            configuration: BatchAssemblerConfig(maxBatchSize: 8, maxWaitMs: 100),
+            handler: engine.makeBatchHandler()
+        )
+
         let chatRouter = ChatRouter { request in
-            // Placeholder: replace with actual MLX model inference
-            ChatCompletionResponse(
-                id: "chatcmpl-\(UUID().uuidString)",
-                created: Int(Date().timeIntervalSince1970),
-                model: request.model,
-                choices: [
-                    Choice(
-                        index: 0,
-                        message: ChatMessage(role: .assistant, content: "Hello from MLX Gateway!"),
-                        finishReason: .stop
-                    )
-                ],
-                usage: Usage(promptTokens: 0, completionTokens: 0)
-            )
+            try await assembler.submit(request)
         }
 
         chatRouter.addRoutes(to: router)

@@ -116,6 +116,13 @@ public enum MessageContent: Codable, Sendable {
         case .parts(let p): try container.encode(p)
         }
     }
+
+    public var textContent: String {
+        switch self {
+        case .text(let s): return s
+        case .parts(let parts): return parts.compactMap(\.text).joined()
+        }
+    }
 }
 
 public struct ContentPart: Codable, Sendable {
