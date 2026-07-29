@@ -43,5 +43,9 @@ let package = Package(
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
             ]
         ),
+        .executableTarget(
+            name: "KVCacheBenchmark",
+            dependencies: []
+        ),
     ]
 )

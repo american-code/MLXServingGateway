@@ -7,10 +7,17 @@ public typealias StreamHandler = @Sendable (ChatCompletionRequest) async throws 
 public struct ChatRouter: Sendable {
     let handler: ChatHandler
     let streamHandler: StreamHandler?
+    /// Per-request deadline in seconds. `nil` disables the timeout.
+    let timeoutSeconds: Double?
 
-    public init(handler: @escaping ChatHandler, streamHandler: StreamHandler? = nil) {
+    public init(
+        handler: @escaping ChatHandler,
+        streamHandler: StreamHandler? = nil,
+        timeoutSeconds: Double? = nil
+    ) {
         self.handler = handler
         self.streamHandler = streamHandler
+        self.timeoutSeconds = timeoutSeconds
     }
 
     public func addRoutes(to router: Router<some RequestContext>) {
@@ -24,23 +31,33 @@ public struct ChatRouter: Sendable {
         do {
             chatRequest = try JSONDecoder().decode(ChatCompletionRequest.self, from: body)
         } catch {
-            let apiError = APIError(message: "Invalid request body: \(error.localizedDescription)", type: "invalid_request_error")
-            let data = try JSONEncoder().encode(apiError)
-            return Response(
+            return errorResponse(
                 status: .badRequest,
-                headers: [.contentType: "application/json"],
-                body: .init(byteBuffer: .init(bytes: data))
+                message: "Invalid request body: \(error.localizedDescription)"
             )
         }
 
-        if chatRequest.stream == true, let streamHandler {
-            return try await sseResponse(for: chatRequest, using: streamHandler)
+        do {
+            if chatRequest.stream == true, let streamHandler {
+                return try await sseResponse(for: chatRequest, using: streamHandler)
+            }
+            return try await jsonResponse(for: chatRequest)
+        } catch is GatewayTimeoutError {
+            return errorResponse(status: .gatewayTimeout, message: "Request timed out")
         }
-        return try await jsonResponse(for: chatRequest)
     }
 
+    // MARK: - Response builders
+
     private func jsonResponse(for chatRequest: ChatCompletionRequest) async throws -> Response {
-        let completion = try await handler(chatRequest)
+        let completion: ChatCompletionResponse
+        if let seconds = timeoutSeconds {
+            completion = try await withDeadline(seconds: seconds) { [handler] in
+                try await handler(chatRequest)
+            }
+        } else {
+            completion = try await handler(chatRequest)
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
         let data = try encoder.encode(completion)
@@ -53,12 +70,20 @@ public struct ChatRouter: Sendable {
 
     private func sseResponse(
         for chatRequest: ChatCompletionRequest,
-        using streamHandler: StreamHandler
+        using streamHandler: @escaping StreamHandler
     ) async throws -> Response {
         let id = "chatcmpl-\(UUID().uuidString)"
         let created = Int(Date().timeIntervalSince1970)
         let model = chatRequest.model
-        let tokenStream = try await streamHandler(chatRequest)
+
+        let tokenStream: AsyncThrowingStream<String, Error>
+        if let seconds = timeoutSeconds {
+            tokenStream = try await withDeadline(seconds: seconds) { [streamHandler] in
+                try await streamHandler(chatRequest)
+            }
+        } else {
+            tokenStream = try await streamHandler(chatRequest)
+        }
 
         let responseBody = ResponseBody { writer in
             let encoder = JSONEncoder()
@@ -69,13 +94,11 @@ public struct ChatRouter: Sendable {
                 return ByteBuffer(string: "data: \(String(decoding: json, as: UTF8.self))\n\n")
             }
 
-            // First chunk carries the role
             try await writer.write(event(ChatCompletionChunk(
                 id: id, created: created, model: model,
                 choices: [StreamChoice(index: 0, delta: DeltaMessage(role: .assistant))]
             )))
 
-            // One chunk per token
             for try await token in tokenStream {
                 try await writer.write(event(ChatCompletionChunk(
                     id: id, created: created, model: model,
@@ -83,7 +106,6 @@ public struct ChatRouter: Sendable {
                 )))
             }
 
-            // Final chunk signals completion
             try await writer.write(event(ChatCompletionChunk(
                 id: id, created: created, model: model,
                 choices: [StreamChoice(index: 0, delta: DeltaMessage(), finishReason: .stop)]
@@ -97,5 +119,35 @@ public struct ChatRouter: Sendable {
             headers: [.contentType: "text/event-stream", .cacheControl: "no-cache"],
             body: responseBody
         )
+    }
+
+    private func errorResponse(status: HTTPResponse.Status, message: String) -> Response {
+        let err = APIError(message: message, type: "server_error")
+        let data = (try? JSONEncoder().encode(err)) ?? Data()
+        return Response(
+            status: status,
+            headers: [.contentType: "application/json"],
+            body: .init(byteBuffer: .init(bytes: data))
+        )
+    }
+
+    // MARK: - Timeout helper
+
+    /// Races `operation` against a sleep of `seconds`. Throws `GatewayTimeoutError` if the
+    /// sleep wins. Cancels the losing task immediately after the winner finishes.
+    private func withDeadline<T: Sendable>(
+        seconds: Double,
+        operation: @Sendable @escaping () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw GatewayTimeoutError()
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
     }
 }

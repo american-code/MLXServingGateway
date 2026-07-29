@@ -7,15 +7,42 @@ struct GatewayServer {
     static func main() async throws {
         let router = Router()
 
-        let engine = MLXInferenceEngine()
+        // API key auth — enabled when API_KEY_FILE env var points to a key file.
+        if let keyFilePath = ProcessInfo.processInfo.environment["API_KEY_FILE"] {
+            let auth = try BearerAuthMiddleware<BasicRequestContext>.loadFromFile(at: keyFilePath)
+            router.add(middleware: auth)
+        }
+
+        // Per-request deadline — configurable via REQUEST_TIMEOUT_SECONDS (default 120 s).
+        let timeoutSeconds: Double
+        if let raw = ProcessInfo.processInfo.environment["REQUEST_TIMEOUT_SECONDS"],
+           let parsed = Double(raw) {
+            timeoutSeconds = parsed
+        } else {
+            timeoutSeconds = 120
+        }
+
+        // Max concurrently-loaded models — configurable via MAX_MODELS (default 3).
+        let maxModels: Int
+        if let raw = ProcessInfo.processInfo.environment["MAX_MODELS"],
+           let parsed = Int(raw) {
+            maxModels = parsed
+        } else {
+            maxModels = 3
+        }
+
+        let engine = MLXInferenceEngine(maxModels: maxModels)
         let assembler = BatchAssembler(
             configuration: BatchAssemblerConfig(maxBatchSize: 8, maxWaitMs: 100),
             handler: engine.makeBatchHandler()
         )
 
-        let chatRouter = ChatRouter { request in
-            try await assembler.submit(request)
-        }
+        let chatRouter = ChatRouter(
+            handler: { request in
+                try await assembler.submit(request)
+            },
+            timeoutSeconds: timeoutSeconds
+        )
 
         chatRouter.addRoutes(to: router)
 

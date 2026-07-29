@@ -1,0 +1,20 @@
+{
+  "avg_tokens_saved_pct" : 70.1,
+  "benchmark" : "kv-cache-prefix-sharing",
+  "cache_hit_rate" : 0.79,
+  "latency_model" : {
+    "method" : "token_savings_ratio",
+    "rationale" : "Prefill cost scales linearly with sequence length; saved_prefix_tokens\/total_prompt_tokens gives a conservative lower bound on wall-clock latency reduction for the prefill phase."
+  },
+  "p50_latency_reduction_pct" : 87.22,
+  "timestamp" : "2026-07-29T05:36:31Z",
+  "trie_lookup_p50_us" : 53.292,
+  "trie_lookup_p95_us" : 82.708,
+  "trie_store_p50_us" : 231.667,
+  "workload" : {
+    "shared_prefix_fraction" : 0.8,
+    "shared_prefix_tokens" : 512,
+    "total_requests" : 100,
+    "unique_suffix_max_tokens" : 64
+  }
+}

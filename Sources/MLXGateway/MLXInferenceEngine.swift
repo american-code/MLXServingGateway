@@ -6,22 +6,33 @@ import MLXLLM
 import MLXHuggingFace
 import MLXLMCommon
 
-/// Actor that lazily loads MLX models and runs batched inference.
+/// Actor that runs batched MLX inference with KV prefix caching.
 ///
+/// Model loading is delegated to a `ModelPool<ModelContainer>` that enforces an
+/// LRU eviction policy when more models are requested than `maxModels` allows.
 /// Requests in a batch share a single model-lock acquisition: all prompts are
-/// tokenized, then each sequence is decoded sequentially using its own
-/// `GenerateParameters` (temperature / top-p / seed). This amortises the
-/// per-batch overhead of acquiring the `SerialAccessContainer` lock and keeps
-/// the model hot in the Metal cache between requests.
+/// tokenised, then each sequence is decoded sequentially.
+///
+/// For each request, the engine:
+///  1. Looks up the prompt token sequence in a per-model prefix trie.
+///  2. On hit: restores cached KV state and feeds only the suffix tokens to the
+///     model, skipping the prefill for the shared prefix.
+///  3. On miss: runs the full prefill, snapshots the KV state at the prompt
+///     boundary (trimming off the first generated token), and stores it.
 public actor MLXInferenceEngine {
-    private var modelCache: [String: ModelContainer] = [:]
+    private let pool: ModelPool<ModelContainer>
+    // One prefix cache per model ID, isolated within this actor.
+    private var prefixCaches: [String: KVPrefixCache] = [:]
 
-    public init() {}
+    public init(maxModels: Int = 3) {
+        pool = ModelPool(maxModels: maxModels) { modelID in
+            try await #huggingFaceLoadModelContainer(
+                configuration: ModelConfiguration(id: modelID)
+            )
+        }
+    }
 
     /// Returns a `BatchHandler` closure suitable for `BatchAssembler`.
-    ///
-    /// The closure captures `self` (the actor) so every batch funnels through
-    /// the actor's serial executor before touching the model cache.
     public nonisolated func makeBatchHandler() -> BatchAssembler.BatchHandler {
         { [self] requests in
             try await self.inferBatch(requests)
@@ -34,30 +45,31 @@ public actor MLXInferenceEngine {
         _ requests: [ChatCompletionRequest]
     ) async throws -> [ChatCompletionResponse] {
         guard !requests.isEmpty else { return [] }
-        let container = try await ensureLoaded(modelID: requests[0].model)
+        let container = try await pool.acquire(modelID: requests[0].model)
         return try await batchedInfer(container: container, requests: requests)
     }
 
-    private func ensureLoaded(modelID: String) async throws -> ModelContainer {
-        if let cached = modelCache[modelID] { return cached }
-        let container = try await #huggingFaceLoadModelContainer(
-            configuration: ModelConfiguration(id: modelID)
-        )
-        modelCache[modelID] = container
-        return container
+    private func getOrCreatePrefixCache(modelID: String) -> KVPrefixCache {
+        if let existing = prefixCaches[modelID] { return existing }
+        let cache = KVPrefixCache()
+        prefixCaches[modelID] = cache
+        return cache
     }
 
     /// Acquires the model lock once, then processes every request sequentially.
     ///
-    /// Sequential-within-lock means:
-    /// - Prefill for request N+1 starts only after decode for request N finishes.
-    /// - The model weights stay hot between requests in the same batch.
-    /// - At most one concurrent Metal command stream is active at any time.
+    /// For each request:
+    ///  - Lookup: find the longest cached prefix in the prefix trie.
+    ///  - Hit: restore KV state; feed only suffix tokens to `TokenIterator`.
+    ///  - Miss: full prefill via `TokenIterator`; snapshot and store KV state.
     private func batchedInfer(
         container: ModelContainer,
         requests: [ChatCompletionRequest]
     ) async throws -> [ChatCompletionResponse] {
-        try await container.perform { context in
+        let modelID = requests[0].model
+        let prefixCache = getOrCreatePrefixCache(modelID: modelID)
+
+        return try await container.perform { context in
             var responses: [ChatCompletionResponse] = []
 
             for request in requests {
@@ -70,6 +82,7 @@ public actor MLXInferenceEngine {
                 let promptTokenIds = try context.tokenizer.applyChatTemplate(
                     messages: messages
                 )
+                let promptInt32 = promptTokenIds.map(Int32.init)
 
                 let params = GenerateParameters(
                     maxTokens: request.maxTokens ?? 512,
@@ -78,26 +91,61 @@ public actor MLXInferenceEngine {
                     seed: request.seed.map(UInt64.init)
                 )
 
-                let lmInput = LMInput(
-                    tokens: MLXArray(promptTokenIds.map(Int32.init), [promptTokenIds.count])
-                )
+                // --- KV prefix cache lookup ---
+                let (prefixLen, cachedEntry) = await prefixCache.lookup(tokens: promptInt32)
 
-                let stream = try MLXLMCommon.generate(
-                    input: lmInput, parameters: params, context: context
-                )
+                let kvCaches: [any KVCache]
+                let inputTokenIds: [Int]
 
-                var outputText = ""
-                var completionTokenCount = 0
-                for await generation in stream {
-                    switch generation {
-                    case .chunk(let text):
-                        outputText += text
-                    case .info(let info):
-                        completionTokenCount = info.generationTokenCount
-                    case .toolCall:
-                        break
+                if let entry = cachedEntry, prefixLen > 0 {
+                    // Hit: restore cached KV state, process only the suffix.
+                    kvCaches = entry.layerStates.map { layerState in
+                        let c = KVCacheSimple()
+                        c.state = layerState
+                        return c as any KVCache
                     }
+                    inputTokenIds = Array(promptTokenIds[prefixLen...])
+                } else {
+                    // Miss: fresh cache, process the whole prompt.
+                    kvCaches = context.model.newCache(parameters: params)
+                    inputTokenIds = promptTokenIds
                 }
+
+                let lmInput = LMInput(
+                    tokens: MLXArray(inputTokenIds.map(Int32.init), [inputTokenIds.count])
+                )
+
+                // Creates the iterator; runs prefill + generates the first token
+                // in-place on `kvCaches` (the cache class instances are mutated).
+                var iterator = try TokenIterator(
+                    input: lmInput,
+                    model: context.model,
+                    cache: kvCaches,
+                    parameters: params
+                )
+
+                // On a cold miss, snapshot KV state at the prompt boundary.
+                // The iterator has already generated one token, so trim 1 off.
+                if cachedEntry == nil || prefixLen == 0 {
+                    let layerStates: [[MLXArray]] = kvCaches.map { c in
+                        let snap = c.copy()
+                        snap.trim(1)
+                        let st = snap.state
+                        eval(st)    // materialise graph before crossing actor boundary
+                        return st
+                    }
+                    await prefixCache.store(tokens: promptInt32, layerStates: layerStates)
+                }
+
+                // Decode until EOS or maxTokens.
+                let eosId = context.tokenizer.eosTokenId
+                var generatedIds: [Int] = []
+                for token in iterator {
+                    if let eosId, token == eosId { break }
+                    generatedIds.append(token)
+                }
+
+                let outputText = context.tokenizer.decode(tokenIds: generatedIds)
 
                 responses.append(
                     ChatCompletionResponse(
@@ -113,7 +161,7 @@ public actor MLXInferenceEngine {
                         ],
                         usage: Usage(
                             promptTokens: promptTokenIds.count,
-                            completionTokens: completionTokenCount
+                            completionTokens: generatedIds.count
                         )
                     )
                 )

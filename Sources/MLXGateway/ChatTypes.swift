@@ -259,6 +259,11 @@ public struct DeltaMessage: Codable, Sendable {
     }
 }
 
+// MARK: - Gateway errors
+
+/// Thrown (and caught inside `ChatRouter`) when a request exceeds the configured deadline.
+public struct GatewayTimeoutError: Error, Sendable {}
+
 // MARK: - Error
 
 public struct APIError: Codable, Sendable {
