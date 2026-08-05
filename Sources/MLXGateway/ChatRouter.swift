@@ -44,6 +44,8 @@ public struct ChatRouter: Sendable {
             return try await jsonResponse(for: chatRequest)
         } catch is GatewayTimeoutError {
             return errorResponse(status: .gatewayTimeout, message: "Request timed out")
+        } catch {
+            return errorResponse(status: .internalServerError, message: "\(error)")
         }
     }
 
