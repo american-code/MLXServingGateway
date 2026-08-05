@@ -53,7 +53,7 @@ Client
   │                                                                   │
   ▼                                                                   │
 [Stream Writer]                                                       │
-  │  stream=true  → SSE (text/event-stream, ChatCompletionChunk)      │
+  │  stream=true  → buffered JSON (SSE not yet wired)                  │
   │  stream=false → buffer all tokens, emit ChatCompletionResponse    │
   │                                                                   └──▶ Client
 ```
@@ -245,15 +245,9 @@ Creates a chat completion.
 }
 ```
 
-**Streaming response** — `text/event-stream` (SSE)
+**Streaming response** — not yet implemented
 
-Each event is a `ChatCompletionChunk`. The final event carries `finish_reason` and is followed by `data: [DONE]`.
-
-```
-data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":...,"model":"...","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
-
-data: [DONE]
-```
+Requests with `"stream": true` currently receive the same buffered `ChatCompletionResponse` as non-streaming requests. The `ChatRouter` SSE code path (`text/event-stream`, `ChatCompletionChunk`) exists but is not wired to the inference engine.
 
 ### GET /v1/models
 

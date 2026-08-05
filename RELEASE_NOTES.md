@@ -18,13 +18,13 @@ First tagged release. This is a working inference server that runs quantized MLX
 `ModelPool` maintains a resident set of loaded models bounded by a configurable capacity. The least-recently-used model is evicted when the pool is full. Models load lazily on first request; a 7B 4-bit model cold-starts in 3–8 seconds on M-series hardware.
 
 ### SSE Streaming
-`MLXInferenceEngine` runs autoregressive decoding and streams tokens back via Server-Sent Events as they are generated. Clients receive `data: {"choices": [...]}` lines in real time, compatible with the OpenAI streaming protocol.
+`ChatRouter` includes SSE infrastructure (`ChatCompletionChunk`, `text/event-stream` response path), but it is not yet wired to the inference engine. Requests with `"stream": true` currently receive a buffered JSON response.
 
 ### API Key Authentication
 `AuthMiddleware` optionally enforces bearer-token authentication. Set `API_KEY_FILE` to a path containing one token per line; unset it to allow unauthenticated access. All other middleware runs regardless.
 
 ### OpenAI-Compatible HTTP API
-`ChatRouter` exposes `/v1/chat/completions` (streaming and non-streaming), `/v1/models`, and `/health`. Request and response shapes follow the OpenAI schema so existing clients work without modification.
+`ChatRouter` exposes `/v1/chat/completions`, `/v1/models`, and `/health`. Request and response shapes follow the OpenAI schema so existing clients work without modification.
 
 ---
 

@@ -100,23 +100,9 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 ```
 
-### Streaming completion (SSE)
+### Streaming completion
 
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -N \
-  -d '{
-    "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
-    "messages": [
-      {"role": "user", "content": "Count from 1 to 5 slowly."}
-    ],
-    "stream": true,
-    "max_tokens": 64
-  }'
-```
-
-Each SSE event is a `ChatCompletionChunk`. The stream closes with `data: [DONE]`.
+> **Note:** SSE streaming is not yet wired up. Requests with `"stream": true` receive a buffered JSON response identical to non-streaming mode.
 
 ### List resident models
 
@@ -171,9 +157,9 @@ POST /v1/chat/completions
        │
   [KVPrefixCache]     ← walk prefix trie; reuse cached KV blocks for shared prefixes
        │
-  [MLXInferenceEngine]← forward pass; autoregressive decoding; SSE token stream
+  [MLXInferenceEngine]← forward pass; autoregressive decoding
        │
-  [ChatRouter]        ← stream=true → SSE  |  stream=false → buffered JSON
+  [ChatRouter]        ← buffered JSON response (SSE not yet wired)
        │
      Client
 ```
@@ -191,13 +177,13 @@ See [`docs/architecture.md`](docs/architecture.md) for the full design, includin
 | Metric | Result |
 |--------|--------|
 | Cache hit rate | **79%** |
-| P50 prefill latency reduction | **87.2%** |
+| P50 prefill latency reduction (measured) | **~0.1%** |
 | Average tokens saved | **70.1%** |
 | Trie lookup P50 | 53.3 µs |
 | Trie lookup P95 | 82.7 µs |
 | Trie store P50 | 231.7 µs |
 
-The latency reduction figure uses a token-savings model: prefill cost scales linearly with sequence length, so `saved_prefix_tokens / total_prompt_tokens` is a conservative lower bound on wall-clock prefill savings.
+The prefix trie tracks token overlap and avoids redundant tokenization, but does not yet feed cached KV states back into the MLX attention kernel — measured wall-clock prefill savings are currently near zero. Trie-lookup overhead (P50 53 µs) stays well below per-token compute cost.
 
 Run the benchmark yourself:
 
