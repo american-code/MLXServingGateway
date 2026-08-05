@@ -28,34 +28,17 @@ The release binary lands at `.build/release/GatewayServer`.
 
 ---
 
-## Model Placement
+## Model Loading
 
-The server scans `~/Models` (configurable via `MODELS_DIR`) for directories that contain both a `config.json` and at least one `*.safetensors` file. Each matching directory is registered as an available model whose ID equals its directory name.
+Models are fetched from the **Hugging Face Hub** on demand using their Hub repository IDs — no local directory scanning or pre-registration is required. Pass the Hub ID in the `"model"` field of your request:
 
-**Recommended layout:**
-
-```
-~/Models/
-├── mlx-community/
-│   ├── Qwen2.5-7B-Instruct-4bit/
-│   │   ├── config.json
-│   │   ├── model.safetensors
-│   │   └── tokenizer.json
-│   └── Llama-3.2-3B-Instruct-4bit/
-│       ├── config.json
-│       └── ...
+```json
+"model": "mlx-community/Qwen2.5-7B-Instruct-4bit"
 ```
 
-Models are loaded lazily on the first request that names them. A cold-start for a 7B 4-bit model takes 3–8 seconds; subsequent requests are served from the resident pool.
+On the first request for a model the server downloads and caches it via the HuggingFace Swift SDK. A cold-start for a 7B 4-bit model takes 3–8 seconds; subsequent requests are served from the resident pool (up to `MAX_MODELS` models at once). The least-recently-used model is evicted when the limit is reached.
 
-**Download a model with mlx-lm:**
-
-```bash
-pip install mlx-lm
-python -m mlx_lm.convert \
-  --hf-path mlx-community/Qwen2.5-7B-Instruct-4bit \
-  --mlx-path ~/Models/mlx-community/Qwen2.5-7B-Instruct-4bit
-```
+The `GET /v1/models` endpoint lists models **currently resident in the pool** — not all models available on the Hub. A model only appears there after at least one successful request has loaded it.
 
 ---
 
@@ -135,7 +118,9 @@ curl http://localhost:8080/v1/chat/completions \
 
 Each SSE event is a `ChatCompletionChunk`. The stream closes with `data: [DONE]`.
 
-### List available models
+### List resident models
+
+Returns models currently loaded in the pool (those that have received at least one request since the server started). Returns an empty list if no requests have been processed yet.
 
 ```bash
 curl http://localhost:8080/v1/models
@@ -155,7 +140,6 @@ All configuration is via environment variables. No config file is required.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MODELS_DIR` | `~/Models` | Directory scanned for MLX model subdirectories |
 | `MAX_MODELS` | `3` | Maximum number of models resident in memory simultaneously. Least-recently-used model is evicted when the limit is reached |
 | `API_KEY_FILE` | *(unset — auth disabled)* | Path to a text file of valid API keys, one per line; `#`-prefixed lines are comments |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | Per-request deadline in seconds. Requests that exceed this return `504 Gateway Timeout` |

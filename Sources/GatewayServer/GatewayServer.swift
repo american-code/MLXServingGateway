@@ -46,6 +46,29 @@ struct GatewayServer {
 
         chatRouter.addRoutes(to: router)
 
+        // GET /v1/models — list models currently loaded in the pool.
+        // Only models that have been requested at least once appear here;
+        // the engine loads from HuggingFace on demand, not from a local directory.
+        router.get("/v1/models") { _, _ async -> Response in
+            let ids = await engine.loadedModelIDs()
+            let list = ModelListResponse(data: ids.map { ModelInfo(id: $0) })
+            let data = (try? JSONEncoder().encode(list)) ?? Data()
+            return Response(
+                status: .ok,
+                headers: [.contentType: "application/json"],
+                body: .init(byteBuffer: .init(bytes: data))
+            )
+        }
+
+        // GET /health — liveness probe.
+        router.get("/health") { _, _ in
+            Response(
+                status: .ok,
+                headers: [.contentType: "application/json"],
+                body: .init(byteBuffer: .init(string: #"{"status":"ok"}"#))
+            )
+        }
+
         let app = Application(
             router: router,
             configuration: .init(address: .hostname("127.0.0.1", port: 8080))

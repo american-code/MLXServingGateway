@@ -259,6 +259,37 @@ public struct DeltaMessage: Codable, Sendable {
     }
 }
 
+// MARK: - Models list (GET /v1/models)
+
+public struct ModelListResponse: Codable, Sendable {
+    public let object: String
+    public let data: [ModelInfo]
+
+    public init(data: [ModelInfo]) {
+        self.object = "list"
+        self.data = data
+    }
+}
+
+public struct ModelInfo: Codable, Sendable {
+    public let id: String
+    public let object: String
+    public let created: Int
+    public let ownedBy: String
+
+    public init(id: String, created: Int = 0, ownedBy: String = "local") {
+        self.id = id
+        self.object = "model"
+        self.created = created
+        self.ownedBy = ownedBy
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, object, created
+        case ownedBy = "owned_by"
+    }
+}
+
 // MARK: - Gateway errors
 
 /// Thrown (and caught inside `ChatRouter`) when a request exceeds the configured deadline.

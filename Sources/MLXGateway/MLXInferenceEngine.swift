@@ -32,6 +32,11 @@ public actor MLXInferenceEngine {
         }
     }
 
+    /// Returns the IDs of models currently resident in the pool.
+    public func loadedModelIDs() async -> [String] {
+        await pool.loadedModelIDs
+    }
+
     /// Returns a `BatchHandler` closure suitable for `BatchAssembler`.
     public nonisolated func makeBatchHandler() -> BatchAssembler.BatchHandler {
         { [self] requests in
