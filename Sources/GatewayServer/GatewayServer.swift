@@ -41,6 +41,7 @@ struct GatewayServer {
             handler: { request in
                 try await assembler.submit(request)
             },
+            streamHandler: engine.makeStreamHandler(),
             timeoutSeconds: timeoutSeconds
         )
 

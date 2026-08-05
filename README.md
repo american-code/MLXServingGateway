@@ -102,7 +102,27 @@ curl http://localhost:8080/v1/chat/completions \
 
 ### Streaming completion
 
-> **Note:** SSE streaming is not yet wired up. Requests with `"stream": true` receive a buffered JSON response identical to non-streaming mode.
+```bash
+curl -N http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user",   "content": "What is the capital of France?"}
+    ],
+    "max_tokens": 128,
+    "stream": true
+  }'
+```
+
+The response is `text/event-stream` (chunked transfer). Each token is delivered as a Server-Sent Event:
+
+```
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"delta":{"content":"Paris"},"index":0}],...}
+
+data: [DONE]
+```
 
 ### List resident models
 
@@ -159,7 +179,7 @@ POST /v1/chat/completions
        │
   [MLXInferenceEngine]← forward pass; autoregressive decoding
        │
-  [ChatRouter]        ← buffered JSON response (SSE not yet wired)
+  [ChatRouter]        ← buffered JSON or SSE streaming response
        │
      Client
 ```

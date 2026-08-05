@@ -44,7 +44,101 @@ public actor MLXInferenceEngine {
         }
     }
 
+    /// Returns a `StreamHandler` closure for per-token SSE streaming.
+    /// The returned stream yields one decoded string fragment per generated token.
+    public nonisolated func makeStreamHandler() -> StreamHandler {
+        { [self] request in
+            AsyncThrowingStream { continuation in
+                Task {
+                    do {
+                        try await self.inferStream(request: request, continuation: continuation)
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Private
+
+    private func inferStream(
+        request: ChatCompletionRequest,
+        continuation: AsyncThrowingStream<String, Error>.Continuation
+    ) async throws {
+        let container = try await pool.acquire(modelID: request.model)
+        let prefixCache = getOrCreatePrefixCache(modelID: request.model)
+
+        try await container.perform { context in
+            let messages: [[String: any Sendable]] = request.messages.map { msg in
+                ["role": msg.role.rawValue as any Sendable,
+                 "content": msg.content.textContent as any Sendable]
+            }
+            let promptTokenIds = try context.tokenizer.applyChatTemplate(messages: messages)
+            let promptInt32 = promptTokenIds.map(Int32.init)
+
+            let params = GenerateParameters(
+                maxTokens: request.maxTokens ?? 512,
+                temperature: Float(request.temperature ?? 0.7),
+                topP: Float(request.topP ?? 1.0),
+                seed: request.seed.map(UInt64.init)
+            )
+
+            let (prefixLen, cachedEntry) = await prefixCache.lookup(tokens: promptInt32)
+
+            let kvCaches: [any KVCache]
+            let inputTokenIds: [Int]
+
+            if let entry = cachedEntry, prefixLen > 0 {
+                let restored = entry.layerStates.map { layerState in
+                    let c = KVCacheSimple()
+                    c.state = layerState
+                    return c as any KVCache
+                }
+                let suffix = Array(promptTokenIds[prefixLen...])
+                if suffix.isEmpty {
+                    restored.forEach { $0.trim(1) }
+                    inputTokenIds = [promptTokenIds.last!]
+                } else {
+                    inputTokenIds = suffix
+                }
+                kvCaches = restored
+            } else {
+                kvCaches = context.model.newCache(parameters: params)
+                inputTokenIds = promptTokenIds
+            }
+
+            let lmInput = LMInput(
+                tokens: MLXArray(inputTokenIds.map(Int32.init), [inputTokenIds.count])
+            )
+
+            let iterator = try TokenIterator(
+                input: lmInput,
+                model: context.model,
+                cache: kvCaches,
+                parameters: params
+            )
+
+            if cachedEntry == nil || prefixLen == 0 {
+                nonisolated(unsafe) let layerStates: [[MLXArray]] = kvCaches.map { c in
+                    let snap = c.copy()
+                    snap.trim(1)
+                    let st = snap.state
+                    eval(st)
+                    return st
+                }
+                await prefixCache.store(tokens: promptInt32, layerStates: layerStates)
+            }
+
+            let eosId = context.tokenizer.eosTokenId
+            for token in iterator {
+                if let eosId, token == eosId { break }
+                let text = context.tokenizer.decode(tokenIds: [token])
+                continuation.yield(text)
+            }
+        }
+    }
 
     private func inferBatch(
         _ requests: [ChatCompletionRequest]
