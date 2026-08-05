@@ -2,7 +2,7 @@ import Foundation
 import Hummingbird
 
 public typealias ChatHandler = @Sendable (ChatCompletionRequest) async throws -> ChatCompletionResponse
-public typealias StreamHandler = @Sendable (ChatCompletionRequest) async throws -> AsyncThrowingStream<String, Error>
+public typealias StreamHandler = @Sendable (ChatCompletionRequest) async throws -> AsyncThrowingStream<StreamChunk, Error>
 
 public struct ChatRouter: Sendable {
     let handler: ChatHandler
@@ -78,7 +78,7 @@ public struct ChatRouter: Sendable {
         let created = Int(Date().timeIntervalSince1970)
         let model = chatRequest.model
 
-        let tokenStream: AsyncThrowingStream<String, Error>
+        let tokenStream: AsyncThrowingStream<StreamChunk, Error>
         if let seconds = timeoutSeconds {
             tokenStream = try await withDeadline(seconds: seconds) { [streamHandler] in
                 try await streamHandler(chatRequest)
@@ -101,16 +101,22 @@ public struct ChatRouter: Sendable {
                 choices: [StreamChoice(index: 0, delta: DeltaMessage(role: .assistant))]
             )))
 
-            for try await token in tokenStream {
-                try await writer.write(event(ChatCompletionChunk(
-                    id: id, created: created, model: model,
-                    choices: [StreamChoice(index: 0, delta: DeltaMessage(content: token))]
-                )))
+            var streamFinishReason: FinishReason = .stop
+            for try await chunk in tokenStream {
+                switch chunk {
+                case .token(let text):
+                    try await writer.write(event(ChatCompletionChunk(
+                        id: id, created: created, model: model,
+                        choices: [StreamChoice(index: 0, delta: DeltaMessage(content: text))]
+                    )))
+                case .done(let reason):
+                    streamFinishReason = reason
+                }
             }
 
             try await writer.write(event(ChatCompletionChunk(
                 id: id, created: created, model: model,
-                choices: [StreamChoice(index: 0, delta: DeltaMessage(), finishReason: .stop)]
+                choices: [StreamChoice(index: 0, delta: DeltaMessage(), finishReason: streamFinishReason)]
             )))
             try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
             try await writer.finish(nil)

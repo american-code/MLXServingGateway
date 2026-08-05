@@ -70,6 +70,21 @@ public enum StopSequence: Codable, Sendable {
         case .multiple(let a): try container.encode(a)
         }
     }
+
+    public var strings: [String] {
+        switch self {
+        case .single(let s): return [s]
+        case .multiple(let a): return a
+        }
+    }
+}
+
+// MARK: - Streaming chunks
+
+/// A single item yielded by a streaming generation handler.
+public enum StreamChunk: Sendable {
+    case token(String)
+    case done(FinishReason)
 }
 
 // MARK: - Message
