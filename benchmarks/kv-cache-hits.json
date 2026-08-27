@@ -15,7 +15,7 @@
       "p50_ms": 585.3,
       "p95_ms": 597.3
     },
-    "hardware": "Apple M1 Pro (lab-02)",
+    "hardware": "Apple M1 Pro (m1-pro-16gb)",
     "max_output_tokens": 1,
     "measurement_date": "2026-07-30T06:58:10Z",
     "method": "wall_clock_sequential",

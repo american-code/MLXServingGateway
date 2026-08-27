@@ -34,8 +34,9 @@ final class StreamingTests: XCTestCase {
             streamHandler: { _ in
                 AsyncThrowingStream { continuation in
                     for token in tokens {
-                        continuation.yield(token)
+                        continuation.yield(.token(token))
                     }
+                    continuation.yield(.done(.stop))
                     continuation.finish()
                 }
             }

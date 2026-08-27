@@ -5,7 +5,7 @@
   "test_date": "2026-07-30T06:10:16Z",
   "weights": "real_bf16",
   "notes": [
-    "Measured on lab-02 (Apple Silicon). Gateway built from Sources/, model weights from HF cache.",
+    "Measured on m1-pro-16gb (Apple M1 Pro, 16 GB unified memory). Gateway built from Sources/, model weights from HF cache.",
     "bf16 base model lacks a chat template; Llama-3.2-Instruct template injected for prompt formatting.",
     "Each request uses a unique [#NNNN] prefix so KV prefix cache is cold per request (cache-miss path).",
     "BatchAssembler: maxBatchSize=8, maxWaitMs=100ms. MLXInferenceEngine actor serializes all inference,",

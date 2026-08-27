@@ -1,7 +1,7 @@
 {
   "benchmark": "gateway-vs-ollama",
   "date": "2026-07-30T06:42:09Z",
-  "hardware": "Apple M1 Pro (lab-02)",
+  "hardware": "Apple M1 Pro (m1-pro-16gb)",
   "model_family": "Llama-3.2-3B (4-bit quantized)",
   "prompt": "Explain what makes Apple Silicon uniquely suited for on-device machine learning inference. Be concise.",
   "max_output_tokens": 128,
@@ -20,6 +20,8 @@
     "memory_mb": 1933.1
   },
   "ollama": {
-    "error": "HTTP Error 500: Internal Server Error"
+    "status": "not_measured",
+    "error": "HTTP Error 500: Internal Server Error",
+    "note": "The Ollama side of this comparison has never produced a result. The local Ollama endpoint returned HTTP 500 on every attempt and the run was not repeated. No gateway-vs-Ollama comparison exists; do not cite one."
   }
 }

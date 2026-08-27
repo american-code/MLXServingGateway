@@ -6,8 +6,8 @@ import Foundation
 
 // MARK: - Fixture
 
-private let validKey = "sk-test-valid-key-abc123"
-private let anotherValidKey = "sk-test-second-key-xyz"
+private let validKey = "test-key-alpha"
+private let anotherValidKey = "test-key-bravo"
 
 private func makeRouter(keys: Set<String>) -> Router<BasicRequestContext> {
     let router = Router()
@@ -148,11 +148,11 @@ final class AuthMiddlewareTests: XCTestCase {
     func testLoadFromFile_parsesKeysAndSkipsComments() throws {
         let content = """
         # This is a comment
-        sk-key-one
+        test-key-one
 
-        sk-key-two
+        test-key-two
         # Another comment
-        sk-key-three
+        test-key-three
         """
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("test-keys-\(UUID().uuidString).txt")

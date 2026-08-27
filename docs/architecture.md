@@ -53,10 +53,12 @@ Client
   │                                                                   │
   ▼                                                                   │
 [Stream Writer]                                                       │
-  │  stream=true  → buffered JSON (SSE not yet wired)                  │
+  │  stream=true  → per-token SSE chunks over text/event-stream        │
   │  stream=false → buffer all tokens, emit ChatCompletionResponse    │
   │                                                                   └──▶ Client
 ```
+
+> **Design document vs. implementation.** This file describes the intended architecture. Where the shipped code diverges, the divergence is called out inline. The two largest today: `MLXInferenceEngine` is an actor that runs each assembled group's requests **sequentially** rather than as a batched forward pass, and the KV prefix cache's restored state has not yet been shown to reduce prefill wall-clock time (last measured: 0.1%, see `benchmarks/kv-cache-hits.json`).
 
 Each stage is an actor or structured-concurrency task; backpressure propagates naturally because the `AsyncStream` buffer is bounded.
 
@@ -73,10 +75,11 @@ Maximise GPU utilisation by grouping requests that can share a single matrix mul
 When a request is enqueued it is assigned to a **(model, bin)** pair:
 
 ```
-bin = ceil(prompt_token_count / BIN_SIZE) * BIN_SIZE
+bin = smallest b in [128, 256, 512, 1024, 2048, 4096] with b >= prompt_token_count
+      (or 8192 if none fits)
 ```
 
-`BIN_SIZE` defaults to 64. Requests in the same bin have padded sequence lengths that differ by at most `BIN_SIZE − 1` tokens, which keeps padding waste under one bin width and avoids jagged tensor shapes that inhibit kernel fusion.
+Requests in the same bin have sequence lengths within one bin width of each other, which keeps padding waste bounded and avoids jagged tensor shapes that inhibit kernel fusion. `prompt_token_count` is currently *estimated* as `characters / 4` rather than tokenised, since binning happens before the model container is acquired.
 
 ### Batch Assembly Loop
 
@@ -89,18 +92,17 @@ repeat every tick (or when a new request arrives):
                 emit batch(candidates[0 ..< MAX_BATCH_SIZE])
 ```
 
-| Parameter        | Default | Notes                                         |
-|-----------------|---------|-----------------------------------------------|
-| `BIN_SIZE`       | 64      | Token-count granularity for sequence grouping |
-| `MAX_BATCH_SIZE` | 8       | Upper bound; constrained by VRAM              |
-| `MIN_BATCH_SIZE` | 1       | Emit immediately when deadline fires          |
-| `max_wait_ms`    | 20 ms   | Per-request deadline from enqueue time        |
+| Parameter       | Default | Notes                                                        |
+|-----------------|---------|--------------------------------------------------------------|
+| bin ladder      | 128…4096 | Geometric; overflow bin at 8192                             |
+| `maxBatchSize`  | 8       | Upper bound on group size                                     |
+| `maxWaitMs`     | 100 ms  | Per-group deadline from first enqueue (`GatewayServer.swift`) |
 
-Setting `max_wait_ms = 0` disables batching (useful for single-request debugging). Setting it higher increases throughput at the cost of tail latency.
+`BatchAssemblerConfig`'s own default for `maxWaitMs` is 50 ms; `GatewayServer` constructs it with 100 ms. Setting `maxWaitMs = 0` dispatches essentially immediately (useful for single-request debugging). Setting it higher increases the chance of a full group at the cost of tail latency.
 
-### Padding & Masking
+### Padding & Masking — not implemented
 
-The batch assembler pads all sequences to the bin length with the model's `pad_token_id`, then constructs an attention mask so padding positions are excluded from softmax.
+The design calls for padding all sequences in a group to the bin length with the model's `pad_token_id` and masking the padding positions out of softmax. **The shipped `batchedInfer` does not do this**, because it does not build a batched tensor at all: it acquires the model container once and iterates the group's requests one at a time, each with its own prompt length. Padding and masking become necessary only once a real batched forward pass lands.
 
 ---
 
@@ -139,6 +141,8 @@ KVBlock {
 **Eviction:**
 
 Blocks are evicted in LRU order when total KV memory exceeds a configurable `kv_cache_max_bytes` limit, subject to `ref_count == 0` (pinned blocks are never evicted).
+
+**Measured effect:** the lookup, restore, and store path is implemented and hits on 79% of the benchmark workload, but the last end-to-end run found a **0.1%** P50 prefill latency reduction versus no cache — effectively nothing (`benchmarks/kv-cache-hits.json`). That measurement predates the store-path correctness fix in `ad92b78` and has not been repeated. Treat the design below as intent and the 0.1% as the current evidence.
 
 ### Block Granularity
 
@@ -197,7 +201,7 @@ func acquire(modelID: ModelID) async throws -> LoadedModel {
 
 ### Model Discovery
 
-At startup, the server scans a configurable `models_dir` (default: `~/Models`) for directories containing `config.json` + `*.safetensors`. Each discovered directory registers as an available `ModelID` equal to its directory name (e.g. `mlx-community/Qwen2.5-7B-Instruct-4bit`). Models are loaded lazily on first request.
+There is no startup directory scan. A `ModelID` is a Hugging Face Hub repo ID (e.g. `mlx-community/Qwen2.5-7B-Instruct-4bit`) passed in the request's `model` field; the engine downloads and caches it via the HuggingFace Swift SDK on first use, then keeps it resident in the pool. Any Hub repo in MLX format is therefore usable without pre-registration.
 
 ---
 
@@ -213,7 +217,7 @@ Creates a chat completion.
 
 | Field               | Type                   | Required | Notes                                   |
 |--------------------|------------------------|----------|-----------------------------------------|
-| `model`             | string                 | yes      | Must match a discovered model directory |
+| `model`             | string                 | yes      | Hugging Face Hub repo ID in MLX format  |
 | `messages`          | array of ChatMessage   | yes      | `role` ∈ {system, user, assistant}      |
 | `temperature`       | float [0, 2]           | no       | Default 1.0                             |
 | `top_p`             | float (0, 1]           | no       | Default 1.0                             |
@@ -245,13 +249,19 @@ Creates a chat completion.
 }
 ```
 
-**Streaming response** — not yet implemented
+**Streaming response** — `text/event-stream`
 
-Requests with `"stream": true` currently receive the same buffered `ChatCompletionResponse` as non-streaming requests. The `ChatRouter` SSE code path (`text/event-stream`, `ChatCompletionChunk`) exists but is not wired to the inference engine.
+Requests with `"stream": true` receive a real per-token SSE stream. `MLXInferenceEngine.makeStreamHandler()` drives `TokenIterator` one token at a time and yields each decoded fragment as a `StreamChunk.token` through an `AsyncThrowingStream`, followed by a single `StreamChunk.done(FinishReason)`. `ChatRouter.sseResponse()` emits these as `ChatCompletionChunk` events with `Content-Type: text/event-stream` and `Cache-Control: no-cache`, opening with a role-establishing chunk and closing with `data: [DONE]`.
+
+```
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"delta":{"content":"Paris"},"index":0}],...}
+
+data: [DONE]
+```
 
 ### GET /v1/models
 
-Lists all discovered models.
+Lists the models **currently resident in the pool** — those that have served at least one request since startup. Returns an empty list before any request is processed; it is not a catalogue of what the Hub offers.
 
 ```jsonc
 {
@@ -280,12 +290,15 @@ All errors follow the OpenAI error envelope:
 }
 ```
 
-| HTTP status | `type`                  | When                                   |
-|-------------|-------------------------|----------------------------------------|
-| 400         | `invalid_request_error` | Malformed JSON, missing required field |
-| 404         | `invalid_request_error` | Model not found                        |
-| 429         | `rate_limit_error`      | Admission gate full                    |
-| 503         | `server_error`          | Model evicted mid-request, load failed |
+| HTTP status | `type`                  | When                                   | Status |
+|-------------|-------------------------|----------------------------------------|--------|
+| 400         | `invalid_request_error` | Malformed JSON, missing required field | shipped |
+| 401         | `invalid_request_error` | Missing or unrecognised bearer token (only when `API_KEY_FILE` is set) | shipped |
+| 500         | `server_error`          | Model load failure, inference error    | shipped |
+| 504         | `server_error`          | Exceeded `REQUEST_TIMEOUT_SECONDS`     | shipped |
+| 404         | `invalid_request_error` | Model not found                        | planned — currently surfaces as 500 |
+| 429         | `rate_limit_error`      | Admission gate full                    | planned — no admission gate is wired yet |
+| 503         | `server_error`          | Model evicted mid-request              | planned |
 
 ---
 
@@ -318,4 +331,4 @@ A flat cache keyed on the full prompt string cannot share a system-prompt block 
 Swift 6 strict concurrency means any shared mutable state must be protected. Actors provide this guarantee with zero boilerplate and compose cleanly with `async`/`await`-based Hummingbird handlers. The alternative (locking with `NSLock` or `OSAllocatedUnfairLock`) would require manual careful reasoning about every access point.
 
 **Why lazy model loading?**
-Loading a 7B 4-bit model takes 3–8 seconds and consumes 4–5 GB of unified memory. Loading every discovered model at startup would block the health endpoint and exhaust memory for any realistic `models_dir`. Lazy loading with coalesced concurrent-load tasks (the `loading` dictionary in `ModelPool`) gives sub-second first-token latency for resident models and correct serialised behaviour for cold starts.
+Loading a 7B 4-bit model takes 3–8 seconds and consumes 4–5 GB of unified memory. Since models are addressed by Hugging Face Hub repo ID, there is no bounded set to preload — and eagerly loading anything would block the health endpoint and exhaust memory. Lazy loading with coalesced concurrent-load tasks (the `loading` dictionary in `ModelPool`) gives fast first-token latency for resident models and correct serialised behaviour for cold starts.
