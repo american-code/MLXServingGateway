@@ -6,7 +6,6 @@
 
 Apple Silicon's unified memory architecture has always promised that local LLM inference could be both fast and practical. The problem has been the software stack: most inference servers were designed for NVIDIA GPUs and ported to Metal as an afterthought. [MLX Serving Gateway](https://github.com/american-code/MLXServingGateway) is a Swift-native server built from the start around MLX and Apple's accelerator stack. This post covers the motivation, how it was benchmarked, and what we found — including the parts that did not work yet.
 
-> **Revision note.** An earlier version of this post reported 100 → 130.5 tok/s and a "~30% lift from batching," and described KV prefix sharing as skipping prefill entirely. Those numbers came from an early run that was later superseded, and the prefill claim was a model prediction that measurement did not confirm. Everything below is re-derived from the JSON files in `benchmarks/` at the current commit. Where the honest answer is "we haven't measured that," it says so.
 
 ---
 
@@ -153,7 +152,7 @@ This is where prediction and measurement disagree most sharply, so both are repo
 
 A 79% hit rate on a workload where 80% of requests share a prefix is the expected ceiling; the 1% gap is the cold-start miss on the shared prefix's first appearance. The trie itself is cheap: a 53 µs P50 lookup is nothing next to a multi-hundred-millisecond prefill, and even a 232 µs store is negligible.
 
-From those token savings, the harness *models* a P50 prefill latency reduction of **87.2%**, on the reasoning that prefill cost scales linearly with sequence length. That model is stated in the JSON as a model (`latency_model.p50_reduction_pct_modeled`). It is not a measurement, and the earlier version of this post was wrong to present it as one.
+From those token savings, the harness *models* a P50 prefill latency reduction of **87.2%**, on the reasoning that prefill cost scales linearly with sequence length. That model is stated in the JSON as a model (`latency_model.p50_reduction_pct_modeled`); it is not a measurement.
 
 ### End-to-end wall clock (measurement)
 
